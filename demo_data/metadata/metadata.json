@@ -1,0 +1,151 @@
+{
+  "tables": {
+    "users": {
+      "name": "users",
+      "columns": [
+        {
+          "name": "user_id",
+          "column_type": "Int64"
+        },
+        {
+          "name": "username",
+          "column_type": "String"
+        },
+        {
+          "name": "age",
+          "column_type": "Int64"
+        },
+        {
+          "name": "balance",
+          "column_type": "Float64"
+        }
+      ],
+      "segments": [
+        {
+          "id": "users_seg_0",
+          "table_name": "users",
+          "path": "./demo_data/segments/users_seg_0",
+          "stats": {
+            "min_values": {
+              "user_id": 1,
+              "username": "user_1",
+              "balance": 122.89999999999964,
+              "age": 18
+            },
+            "max_values": {
+              "user_id": 100,
+              "balance": 9999.45,
+              "username": "user_99",
+              "age": 79
+            },
+            "row_count": 100
+          },
+          "created_at": 1762535295,
+          "size_bytes": 1699
+        }
+      ],
+      "created_at": 1762535295
+    },
+    "events": {
+      "name": "events",
+      "columns": [
+        {
+          "name": "event_id",
+          "column_type": "Int64"
+        },
+        {
+          "name": "user_id",
+          "column_type": "Int64"
+        },
+        {
+          "name": "event_type",
+          "column_type": "String"
+        },
+        {
+          "name": "value",
+          "column_type": "Float64"
+        },
+        {
+          "name": "is_processed",
+          "column_type": "Boolean"
+        }
+      ],
+      "segments": [
+        {
+          "id": "events_seg_0",
+          "table_name": "events",
+          "path": "./demo_data/segments/events_seg_0",
+          "stats": {
+            "min_values": {
+              "is_processed": false,
+              "event_id": 0,
+              "event_type": "click",
+              "value": 0.0,
+              "user_id": 1
+            },
+            "max_values": {
+              "event_type": "view",
+              "event_id": 999,
+              "value": 999.0,
+              "is_processed": true,
+              "user_id": 100
+            },
+            "row_count": 1000
+          },
+          "created_at": 1762535295,
+          "size_bytes": 8687
+        },
+        {
+          "id": "events_seg_1",
+          "table_name": "events",
+          "path": "./demo_data/segments/events_seg_1",
+          "stats": {
+            "min_values": {
+              "event_id": 1000,
+              "value": 1.0,
+              "user_id": 1,
+              "is_processed": false,
+              "event_type": "click"
+            },
+            "max_values": {
+              "is_processed": true,
+              "user_id": 100,
+              "event_type": "view",
+              "value": 999.5,
+              "event_id": 1999
+            },
+            "row_count": 1000
+          },
+          "created_at": 1762535295,
+          "size_bytes": 8690
+        },
+        {
+          "id": "events_seg_2",
+          "table_name": "events",
+          "path": "./demo_data/segments/events_seg_2",
+          "stats": {
+            "min_values": {
+              "event_id": 2000,
+              "event_type": "click",
+              "user_id": 1,
+              "is_processed": false,
+              "value": 0.0
+            },
+            "max_values": {
+              "event_type": "view",
+              "value": 999.0,
+              "is_processed": true,
+              "event_id": 2999,
+              "user_id": 100
+            },
+            "row_count": 1000
+          },
+          "created_at": 1762535295,
+          "size_bytes": 8698
+        }
+      ],
+      "created_at": 1762535295
+    }
+  },
+  "version": 6
+}

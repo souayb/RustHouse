@@ -25,10 +25,7 @@ impl SegmentWriter {
     }
 
     /// Write multiple columns to a segment
-    pub async fn write(
-        &self,
-        data: HashMap<String, ColumnData>,
-    ) -> Result<Segment> {
+    pub async fn write(&self, data: HashMap<String, ColumnData>) -> Result<Segment> {
         // Validate all columns present
         for column in &self.columns {
             if !data.contains_key(&column.name) {
@@ -62,7 +59,7 @@ impl SegmentWriter {
 
         for (i, column) in self.columns.iter().enumerate() {
             let col_data = data.get(&column.name).unwrap();
-            
+
             // Validate column type matches
             if col_data.column_type() != column.column_type {
                 return Err(RustHouseError::TypeMismatch(format!(
@@ -120,11 +117,7 @@ impl SegmentReader {
     }
 
     /// Read a specific column from the segment
-    pub async fn read_column(
-        &self,
-        column_name: &str,
-        row_count: usize,
-    ) -> Result<ColumnData> {
+    pub async fn read_column(&self, column_name: &str, row_count: usize) -> Result<ColumnData> {
         // Find column index
         let (index, column) = self
             .columns
@@ -140,10 +133,7 @@ impl SegmentReader {
     }
 
     /// Read all columns from the segment
-    pub async fn read_all(
-        &self,
-        row_count: usize,
-    ) -> Result<HashMap<String, ColumnData>> {
+    pub async fn read_all(&self, row_count: usize) -> Result<HashMap<String, ColumnData>> {
         let mut data = HashMap::new();
 
         for column in &self.columns {
@@ -209,8 +199,14 @@ mod tests {
         assert!(segment.size_bytes > 0);
 
         // Verify stats
-        assert_eq!(segment.stats.min_values.get("id").unwrap(), &serde_json::json!(1));
-        assert_eq!(segment.stats.max_values.get("id").unwrap(), &serde_json::json!(5));
+        assert_eq!(
+            segment.stats.min_values.get("id").unwrap(),
+            &serde_json::json!(1)
+        );
+        assert_eq!(
+            segment.stats.max_values.get("id").unwrap(),
+            &serde_json::json!(5)
+        );
 
         // Read segment back
         let reader = SegmentReader::new(&segment_path, columns);
@@ -243,7 +239,10 @@ mod tests {
         let mut data = HashMap::new();
         data.insert("id".to_string(), ColumnData::Int64(vec![1, 2, 3]));
         data.insert("value".to_string(), ColumnData::Float64(vec![1.1, 2.2])); // Wrong count
-        data.insert("name".to_string(), ColumnData::String(vec!["a".to_string()]));
+        data.insert(
+            "name".to_string(),
+            ColumnData::String(vec!["a".to_string()]),
+        );
 
         // Should fail due to mismatched row counts
         let result = writer.write(data).await;
@@ -276,7 +275,10 @@ mod tests {
 
         let mut data = HashMap::new();
         data.insert("id".to_string(), ColumnData::Int64(vec![10, 20, 30]));
-        data.insert("value".to_string(), ColumnData::Float64(vec![1.0, 2.0, 3.0]));
+        data.insert(
+            "value".to_string(),
+            ColumnData::Float64(vec![1.0, 2.0, 3.0]),
+        );
         data.insert(
             "name".to_string(),
             ColumnData::String(vec!["x".to_string(), "y".to_string(), "z".to_string()]),

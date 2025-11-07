@@ -1,7 +1,7 @@
 use crate::error::{Result, RustHouseError};
 use crate::storage::Predicate;
 use sqlparser::ast::{
-    BinaryOperator, Expr, FunctionArg, FunctionArgExpr, GroupByExpr, Query, Select, SelectItem, 
+    BinaryOperator, Expr, FunctionArg, FunctionArgExpr, GroupByExpr, Query, Select, SelectItem,
     SetExpr, Statement, TableFactor,
 };
 
@@ -97,23 +97,22 @@ impl Planner {
             .iter()
             .any(|item| self.is_aggregate_item(item));
 
-        let has_group_by = matches!(select.group_by, GroupByExpr::Expressions(ref exprs) if !exprs.is_empty());
+        let has_group_by =
+            matches!(select.group_by, GroupByExpr::Expressions(ref exprs) if !exprs.is_empty());
 
         if has_aggregates || has_group_by {
             // Build aggregation plan
             let group_by = match select.group_by {
-                GroupByExpr::Expressions(exprs) => {
-                    exprs.iter()
-                        .map(|expr| self.expr_to_column_name(expr))
-                        .collect::<Result<Vec<_>>>()?
-                }
+                GroupByExpr::Expressions(exprs) => exprs
+                    .iter()
+                    .map(|expr| self.expr_to_column_name(expr))
+                    .collect::<Result<Vec<_>>>()?,
                 _ => Vec::new(),
             };
 
             let mut aggregates = Vec::new();
             for item in &select.projection {
-                if let SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } =
-                    item
+                if let SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } = item
                 {
                     if let Some(agg) = self.expr_to_aggregate(expr, item)? {
                         aggregates.push(agg);
@@ -142,9 +141,12 @@ impl Planner {
 
     fn extract_table_name(&self, relation: &TableFactor) -> Result<String> {
         match relation {
-            TableFactor::Table { name, .. } => {
-                Ok(name.0.iter().map(|i| i.value.clone()).collect::<Vec<_>>().join("."))
-            }
+            TableFactor::Table { name, .. } => Ok(name
+                .0
+                .iter()
+                .map(|i| i.value.clone())
+                .collect::<Vec<_>>()
+                .join(".")),
             _ => Err(RustHouseError::SqlParse(
                 "Complex table expressions not supported".to_string(),
             )),
@@ -153,36 +155,34 @@ impl Planner {
 
     fn expr_to_predicate(&self, expr: Expr) -> Result<Predicate> {
         match expr {
-            Expr::BinaryOp { left, op, right } => {
-                match op {
-                    BinaryOperator::And => {
-                        let left_pred = self.expr_to_predicate(*left)?;
-                        let right_pred = self.expr_to_predicate(*right)?;
-                        Ok(Predicate::And(Box::new(left_pred), Box::new(right_pred)))
-                    }
-                    BinaryOperator::Or => {
-                        let left_pred = self.expr_to_predicate(*left)?;
-                        let right_pred = self.expr_to_predicate(*right)?;
-                        Ok(Predicate::Or(Box::new(left_pred), Box::new(right_pred)))
-                    }
-                    _ => {
-                        let column = self.expr_to_column_name(&left)?;
-                        let value = self.expr_to_value(&right)?;
+            Expr::BinaryOp { left, op, right } => match op {
+                BinaryOperator::And => {
+                    let left_pred = self.expr_to_predicate(*left)?;
+                    let right_pred = self.expr_to_predicate(*right)?;
+                    Ok(Predicate::And(Box::new(left_pred), Box::new(right_pred)))
+                }
+                BinaryOperator::Or => {
+                    let left_pred = self.expr_to_predicate(*left)?;
+                    let right_pred = self.expr_to_predicate(*right)?;
+                    Ok(Predicate::Or(Box::new(left_pred), Box::new(right_pred)))
+                }
+                _ => {
+                    let column = self.expr_to_column_name(&left)?;
+                    let value = self.expr_to_value(&right)?;
 
-                        match op {
-                            BinaryOperator::Eq => Ok(Predicate::Eq(column, value)),
-                            BinaryOperator::Gt => Ok(Predicate::Gt(column, value)),
-                            BinaryOperator::Lt => Ok(Predicate::Lt(column, value)),
-                            BinaryOperator::GtEq => Ok(Predicate::Gte(column, value)),
-                            BinaryOperator::LtEq => Ok(Predicate::Lte(column, value)),
-                            _ => Err(RustHouseError::SqlParse(format!(
-                                "Unsupported operator: {:?}",
-                                op
-                            ))),
-                        }
+                    match op {
+                        BinaryOperator::Eq => Ok(Predicate::Eq(column, value)),
+                        BinaryOperator::Gt => Ok(Predicate::Gt(column, value)),
+                        BinaryOperator::Lt => Ok(Predicate::Lt(column, value)),
+                        BinaryOperator::GtEq => Ok(Predicate::Gte(column, value)),
+                        BinaryOperator::LtEq => Ok(Predicate::Lte(column, value)),
+                        _ => Err(RustHouseError::SqlParse(format!(
+                            "Unsupported operator: {:?}",
+                            op
+                        ))),
                     }
                 }
-            }
+            },
             _ => Err(RustHouseError::SqlParse(
                 "Complex predicates not yet supported".to_string(),
             )),
@@ -192,9 +192,11 @@ impl Planner {
     fn expr_to_column_name(&self, expr: &Expr) -> Result<String> {
         match expr {
             Expr::Identifier(ident) => Ok(ident.value.clone()),
-            Expr::CompoundIdentifier(idents) => {
-                Ok(idents.iter().map(|i| i.value.clone()).collect::<Vec<_>>().join("."))
-            }
+            Expr::CompoundIdentifier(idents) => Ok(idents
+                .iter()
+                .map(|i| i.value.clone())
+                .collect::<Vec<_>>()
+                .join(".")),
             _ => Err(RustHouseError::SqlParse(format!(
                 "Expected column name, got: {:?}",
                 expr
@@ -241,20 +243,13 @@ impl Planner {
         match expr {
             Expr::Function(func) => {
                 let name = func.name.to_string().to_uppercase();
-                matches!(
-                    name.as_str(),
-                    "COUNT" | "SUM" | "AVG" | "MIN" | "MAX"
-                )
+                matches!(name.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX")
             }
             _ => false,
         }
     }
 
-    fn expr_to_aggregate(
-        &self,
-        expr: &Expr,
-        item: &SelectItem,
-    ) -> Result<Option<AggregateExpr>> {
+    fn expr_to_aggregate(&self, expr: &Expr, item: &SelectItem) -> Result<Option<AggregateExpr>> {
         if !self.is_aggregate_expr(expr) {
             return Ok(None);
         }
@@ -282,9 +277,10 @@ impl Planner {
                     FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => {
                         Some(self.expr_to_column_name(e)?)
                     }
-                    FunctionArg::Named { arg: FunctionArgExpr::Expr(e), .. } => {
-                        Some(self.expr_to_column_name(e)?)
-                    }
+                    FunctionArg::Named {
+                        arg: FunctionArgExpr::Expr(e),
+                        ..
+                    } => Some(self.expr_to_column_name(e)?),
                     _ => None,
                 }
             };
@@ -362,21 +358,17 @@ mod tests {
         let parser = Parser::new();
         let planner = Planner::new();
 
-        let stmt = parser
-            .parse("SELECT * FROM users WHERE id > 100")
-            .unwrap();
+        let stmt = parser.parse("SELECT * FROM users WHERE id > 100").unwrap();
         let plan = planner.plan(stmt).unwrap();
 
         match plan {
-            LogicalPlan::Filter { predicate, .. } => {
-                match predicate {
-                    Predicate::Gt(col, val) => {
-                        assert_eq!(col, "id");
-                        assert_eq!(val, serde_json::json!(100));
-                    }
-                    _ => panic!("Expected Gt predicate"),
+            LogicalPlan::Filter { predicate, .. } => match predicate {
+                Predicate::Gt(col, val) => {
+                    assert_eq!(col, "id");
+                    assert_eq!(val, serde_json::json!(100));
                 }
-            }
+                _ => panic!("Expected Gt predicate"),
+            },
             _ => panic!("Expected filter plan"),
         }
     }

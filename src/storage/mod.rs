@@ -1,7 +1,7 @@
 pub mod column_writer;
-pub mod segment;
 pub mod pruner;
+pub mod segment;
 
-pub use column_writer::{ColumnWriter, ColumnData};
-pub use segment::{SegmentWriter, SegmentReader};
-pub use pruner::{SegmentPruner, Predicate};
+pub use column_writer::{ColumnData, ColumnWriter};
+pub use pruner::{Predicate, SegmentPruner};
+pub use segment::{SegmentReader, SegmentWriter};

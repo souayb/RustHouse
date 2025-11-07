@@ -332,10 +332,7 @@ mod tests {
             .insert("id".to_string(), serde_json::json!(1000));
         stats.row_count = 1000;
 
-        assert_eq!(
-            stats.min_values.get("id").unwrap(),
-            &serde_json::json!(1)
-        );
+        assert_eq!(stats.min_values.get("id").unwrap(), &serde_json::json!(1));
         assert_eq!(
             stats.max_values.get("id").unwrap(),
             &serde_json::json!(1000)

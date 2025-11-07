@@ -170,8 +170,8 @@ impl ColumnData {
                             "Invalid string column format".to_string(),
                         ));
                     }
-                    let len = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
-                        as usize;
+                    let len =
+                        u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
                     offset += 4;
                     if offset + len > bytes.len() {
                         return Err(RustHouseError::InvalidData(
@@ -207,15 +207,13 @@ pub struct ColumnWriter {
 
 impl ColumnWriter {
     pub fn new(compression_level: i32) -> Self {
-        Self { _compression_level: compression_level }
+        Self {
+            _compression_level: compression_level,
+        }
     }
 
     /// Write a column to disk with compression
-    pub async fn write<P: AsRef<Path>>(
-        &self,
-        path: P,
-        data: &ColumnData,
-    ) -> Result<u64> {
+    pub async fn write<P: AsRef<Path>>(&self, path: P, data: &ColumnData) -> Result<u64> {
         let bytes = data.to_bytes();
         let compressed = lz4_flex::compress_prepend_size(&bytes);
 
@@ -263,8 +261,7 @@ mod tests {
         let bytes = data.to_bytes();
         assert_eq!(bytes.len(), 24); // 3 * 8 bytes
 
-        let deserialized =
-            ColumnData::from_bytes(&bytes, &ColumnType::Int64, 3).unwrap();
+        let deserialized = ColumnData::from_bytes(&bytes, &ColumnType::Int64, 3).unwrap();
         match deserialized {
             ColumnData::Int64(v) => assert_eq!(v, vec![1, 2, 3]),
             _ => panic!("Wrong type"),
@@ -273,14 +270,10 @@ mod tests {
 
     #[test]
     fn test_column_data_serialization_string() {
-        let data = ColumnData::String(vec![
-            "hello".to_string(),
-            "world".to_string(),
-        ]);
+        let data = ColumnData::String(vec!["hello".to_string(), "world".to_string()]);
         let bytes = data.to_bytes();
 
-        let deserialized =
-            ColumnData::from_bytes(&bytes, &ColumnType::String, 2).unwrap();
+        let deserialized = ColumnData::from_bytes(&bytes, &ColumnType::String, 2).unwrap();
         match deserialized {
             ColumnData::String(v) => {
                 assert_eq!(v.len(), 2);
@@ -341,16 +334,21 @@ mod tests {
 
     #[test]
     fn test_boolean_serialization() {
-        let data = ColumnData::Boolean(vec![true, false, true, true, false, false, true, false, true]);
+        let data = ColumnData::Boolean(vec![
+            true, false, true, true, false, false, true, false, true,
+        ]);
         let bytes = data.to_bytes();
-        
+
         // 9 booleans = 2 bytes (8 + 1)
         assert_eq!(bytes.len(), 2);
 
         let deserialized = ColumnData::from_bytes(&bytes, &ColumnType::Boolean, 9).unwrap();
         match deserialized {
             ColumnData::Boolean(v) => {
-                assert_eq!(v, vec![true, false, true, true, false, false, true, false, true]);
+                assert_eq!(
+                    v,
+                    vec![true, false, true, true, false, false, true, false, true]
+                );
             }
             _ => panic!("Wrong type"),
         }

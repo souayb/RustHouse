@@ -1,7 +1,7 @@
 use rusthouse::config::Config;
 use rusthouse::meta::{Column, ColumnType, Metadata, MetadataStore, Table};
 use rusthouse::storage::column_writer::ColumnData;
-use rusthouse::storage::{SegmentWriter, SegmentReader, SegmentPruner, Predicate};
+use rusthouse::storage::{Predicate, SegmentPruner, SegmentReader, SegmentWriter};
 use std::collections::HashMap;
 
 #[tokio::main]
@@ -120,7 +120,12 @@ async fn populate_events_table(
         let start_id = segment_idx * 1000;
         let end_id = start_id + 1000;
 
-        println!("  Creating segment {} (event_id: {}-{})...", segment_idx, start_id, end_id - 1);
+        println!(
+            "  Creating segment {} (event_id: {}-{})...",
+            segment_idx,
+            start_id,
+            end_id - 1
+        );
 
         let mut data = HashMap::new();
 
@@ -182,10 +187,7 @@ async fn populate_users_table(
     data.insert("user_id".to_string(), ColumnData::Int64(user_ids.clone()));
 
     // Generate usernames
-    let usernames: Vec<String> = user_ids
-        .iter()
-        .map(|&id| format!("user_{}", id))
-        .collect();
+    let usernames: Vec<String> = user_ids.iter().map(|&id| format!("user_{}", id)).collect();
     data.insert("username".to_string(), ColumnData::String(usernames));
 
     // Generate ages (18-80)
@@ -224,17 +226,23 @@ fn display_summary(metadata: &Metadata) {
             println!("     - {} ({:?})", col.name, col.column_type);
         }
         println!("   Segments: {}", table.segments.len());
-        
+
         let total_rows: usize = table.segments.iter().map(|s| s.stats.row_count).sum();
         let total_size: u64 = table.segments.iter().map(|s| s.size_bytes).sum();
-        
+
         println!("   Total rows: {}", total_rows);
-        println!("   Total size: {} bytes ({:.2} KB)", total_size, total_size as f64 / 1024.0);
-        
+        println!(
+            "   Total size: {} bytes ({:.2} KB)",
+            total_size,
+            total_size as f64 / 1024.0
+        );
+
         for (idx, segment) in table.segments.iter().enumerate() {
-            println!("     Segment {}: {} rows, {} bytes", 
-                idx, segment.stats.row_count, segment.size_bytes);
-            
+            println!(
+                "     Segment {}: {} rows, {} bytes",
+                idx, segment.stats.row_count, segment.size_bytes
+            );
+
             // Show min/max stats for first column
             if let Some(first_col) = table.columns.first() {
                 if let (Some(min), Some(max)) = (
@@ -249,9 +257,7 @@ fn display_summary(metadata: &Metadata) {
     }
 }
 
-async fn demonstrate_queries(
-    metadata: &Metadata,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn demonstrate_queries(metadata: &Metadata) -> Result<(), Box<dyn std::error::Error>> {
     let events_table = metadata.get_table("events").unwrap();
 
     // Query 1: Exact match - should prune 2 out of 3 segments
@@ -260,8 +266,10 @@ async fn demonstrate_queries(
     let pruned1 = SegmentPruner::prune_segments(&events_table.segments, &predicate1);
     println!("  Segments before pruning: {}", events_table.segments.len());
     println!("  Segments after pruning: {}", pruned1.len());
-    println!("  Pruning efficiency: {:.1}%\n", 
-        (1.0 - pruned1.len() as f64 / events_table.segments.len() as f64) * 100.0);
+    println!(
+        "  Pruning efficiency: {:.1}%\n",
+        (1.0 - pruned1.len() as f64 / events_table.segments.len() as f64) * 100.0
+    );
 
     // Query 2: Range query - should prune some segments
     println!("Query 2: SELECT * FROM events WHERE event_id > 2500");
@@ -269,27 +277,39 @@ async fn demonstrate_queries(
     let pruned2 = SegmentPruner::prune_segments(&events_table.segments, &predicate2);
     println!("  Segments before pruning: {}", events_table.segments.len());
     println!("  Segments after pruning: {}", pruned2.len());
-    println!("  Pruning efficiency: {:.1}%\n", 
-        (1.0 - pruned2.len() as f64 / events_table.segments.len() as f64) * 100.0);
+    println!(
+        "  Pruning efficiency: {:.1}%\n",
+        (1.0 - pruned2.len() as f64 / events_table.segments.len() as f64) * 100.0
+    );
 
     // Query 3: Complex predicate
     println!("Query 3: SELECT * FROM events WHERE event_id > 500 AND event_id < 1500");
     let predicate3 = Predicate::And(
-        Box::new(Predicate::Gt("event_id".to_string(), serde_json::json!(500))),
-        Box::new(Predicate::Lt("event_id".to_string(), serde_json::json!(1500))),
+        Box::new(Predicate::Gt(
+            "event_id".to_string(),
+            serde_json::json!(500),
+        )),
+        Box::new(Predicate::Lt(
+            "event_id".to_string(),
+            serde_json::json!(1500),
+        )),
     );
     let pruned3 = SegmentPruner::prune_segments(&events_table.segments, &predicate3);
     println!("  Segments before pruning: {}", events_table.segments.len());
     println!("  Segments after pruning: {}", pruned3.len());
-    println!("  Pruning efficiency: {:.1}%\n", 
-        (1.0 - pruned3.len() as f64 / events_table.segments.len() as f64) * 100.0);
+    println!(
+        "  Pruning efficiency: {:.1}%\n",
+        (1.0 - pruned3.len() as f64 / events_table.segments.len() as f64) * 100.0
+    );
 
     // Actually read some data from a segment
     println!("Query 4: Reading actual data from events segment 0...");
     let segment = &events_table.segments[0];
     let reader = SegmentReader::new(&segment.path, events_table.columns.clone());
-    let data = reader.read_column("event_id", segment.stats.row_count).await?;
-    
+    let data = reader
+        .read_column("event_id", segment.stats.row_count)
+        .await?;
+
     match data {
         ColumnData::Int64(ids) => {
             println!("  First 10 event IDs: {:?}", &ids[0..10.min(ids.len())]);

@@ -1,5 +1,5 @@
 use crate::error::{Result, RustHouseError};
-use sqlparser::ast::{Statement, Query};
+use sqlparser::ast::{Query, Statement};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser as SqlParser;
 
@@ -19,7 +19,9 @@ impl Parser {
             .map_err(|e| RustHouseError::SqlParse(e.to_string()))?;
 
         if statements.is_empty() {
-            return Err(RustHouseError::SqlParse("No SQL statement found".to_string()));
+            return Err(RustHouseError::SqlParse(
+                "No SQL statement found".to_string(),
+            ));
         }
 
         if statements.len() > 1 {
@@ -58,7 +60,7 @@ mod tests {
         let parser = Parser::new();
         let sql = "SELECT id, name FROM users";
         let stmt = parser.parse(sql).unwrap();
-        
+
         match stmt {
             Statement::Query(_) => {
                 // Success
@@ -72,7 +74,7 @@ mod tests {
         let parser = Parser::new();
         let sql = "SELECT id, name FROM users WHERE id > 100";
         let query = parser.parse_query(sql).unwrap();
-        
+
         if let SetExpr::Select(select) = *query.body {
             assert!(select.selection.is_some());
         } else {
@@ -85,9 +87,12 @@ mod tests {
         let parser = Parser::new();
         let sql = "SELECT COUNT(*), SUM(price) FROM orders GROUP BY user_id";
         let query = parser.parse_query(sql).unwrap();
-        
+
         if let SetExpr::Select(select) = *query.body {
-            assert!(matches!(select.group_by, sqlparser::ast::GroupByExpr::Expressions(_)));
+            assert!(matches!(
+                select.group_by,
+                sqlparser::ast::GroupByExpr::Expressions(_)
+            ));
         } else {
             panic!("Expected SELECT");
         }

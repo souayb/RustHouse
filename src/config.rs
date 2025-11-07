@@ -15,8 +15,8 @@ impl Config {
             data_dir,
             bind_address,
             max_segment_size: 1024 * 1024 * 100, // 100MB default
-            compaction_interval_secs: 300,        // 5 minutes
-            compression_level: 3,                  // LZ4 default level
+            compaction_interval_secs: 300,       // 5 minutes
+            compression_level: 3,                // LZ4 default level
         }
     }
 

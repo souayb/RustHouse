@@ -130,8 +130,14 @@ mod tests {
             PathBuf::from(format!("/data/{}", id)),
         );
 
-        segment.stats.min_values.insert("id".to_string(), serde_json::json!(min_id));
-        segment.stats.max_values.insert("id".to_string(), serde_json::json!(max_id));
+        segment
+            .stats
+            .min_values
+            .insert("id".to_string(), serde_json::json!(min_id));
+        segment
+            .stats
+            .max_values
+            .insert("id".to_string(), serde_json::json!(max_id));
         segment.stats.row_count = (max_id - min_id + 1) as usize;
 
         segment
@@ -270,9 +276,15 @@ mod tests {
             "test".to_string(),
             PathBuf::from("/data/seg1"),
         );
-        
-        segment.stats.min_values.insert("name".to_string(), serde_json::json!("apple"));
-        segment.stats.max_values.insert("name".to_string(), serde_json::json!("zebra"));
+
+        segment
+            .stats
+            .min_values
+            .insert("name".to_string(), serde_json::json!("apple"));
+        segment
+            .stats
+            .max_values
+            .insert("name".to_string(), serde_json::json!("zebra"));
 
         let segments = vec![segment];
 

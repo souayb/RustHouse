@@ -148,6 +148,7 @@ impl SegmentReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::meta::ColumnType;
     use tempfile::TempDir;
 
     fn create_test_columns() -> Vec<Column> {

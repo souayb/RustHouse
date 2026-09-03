@@ -110,7 +110,7 @@ async fn populate_events_table(
     config: &Config,
     metadata: &mut Metadata,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let event_types = vec!["click", "view", "purchase", "signup", "login"];
+    let event_types = ["click", "view", "purchase", "signup", "login"];
 
     // Clone columns once to avoid borrow issues
     let columns = metadata.get_table("events").unwrap().columns.clone();

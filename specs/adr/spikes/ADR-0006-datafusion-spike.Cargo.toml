@@ -1,0 +1,10 @@
+[package]
+name = "df_spike"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+datafusion = { version = "55", default-features = false, features = ["parquet", "sql"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+arrow = "*"
+parquet = "*"

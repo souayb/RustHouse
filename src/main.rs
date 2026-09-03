@@ -1,13 +1,19 @@
-use anyhow::Result;
-use clap::Parser;
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use rusthouse::auth::StaticFileAuthenticator;
+use rusthouse::catalog::Catalog;
 use rusthouse::config::Config;
+use rusthouse::governance::audit::{self, AuditSink, ExportFilter, FileAuditSink};
+use rusthouse::http_api::{create_router, AppState};
+use rusthouse::session::Session;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::signal;
 use tracing::{info, warn};
 
 #[derive(Parser, Debug)]
 #[command(name = "rusthouse")]
-#[command(about = "A ClickHouse-like OLAP database in Rust", long_about = None)]
+#[command(about = "RustHouse: a hybrid Lakehouse with bank-grade governance", long_about = None)]
 struct Args {
     /// Configuration file path
     #[arg(short, long, default_value = "config.json")]
@@ -24,13 +30,55 @@ struct Args {
     /// Log level
     #[arg(short, long, default_value = "info")]
     log_level: String,
+
+    /// Static authenticator JSON file (API-SQL-002). Without it every request is 401.
+    #[arg(long)]
+    auth_file: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Start the HTTP server (default)
+    Serve,
+    /// Audit log tooling (GOV-AUD-006, GOV-AUD-010)
+    Audit {
+        #[command(subcommand)]
+        cmd: AuditCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AuditCmd {
+    /// Walk the hash chain and report the first broken record
+    Verify {
+        #[arg(long)]
+        from: Option<u64>,
+    },
+    /// Export records as JSONL plus a manifest for independent verification
+    Export {
+        /// RFC 3339 lower bound (inclusive)
+        #[arg(long)]
+        from: Option<String>,
+        /// RFC 3339 upper bound (inclusive)
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        principal: Option<String>,
+        #[arg(long)]
+        table: Option<String>,
+        /// Output file (stdout if omitted); the manifest goes to `<out>.manifest.json`
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -40,87 +88,122 @@ async fn main() -> Result<()> {
         .with_thread_ids(true)
         .init();
 
-    info!("Starting RustHouse OLAP Database");
-    info!("Data directory: {}", args.data_dir);
-    info!("Bind address: {}", args.bind);
+    let mut config = Config::new(args.data_dir.clone(), args.bind.clone());
+    config.auth_file = args.auth_file.clone();
 
-    // Load configuration
-    let config = Config::new(args.data_dir.clone(), args.bind.clone());
-    let config = Arc::new(config);
-
-    info!("Configuration loaded successfully");
-
-    // Create data directory if it doesn't exist
-    tokio::fs::create_dir_all(&args.data_dir).await?;
-
-    // Start HTTP server
-    let server_handle = tokio::spawn({
-        let config = Arc::clone(&config);
-        async move {
-            if let Err(e) = start_server(config).await {
-                warn!("Server error: {}", e);
-            }
-        }
-    });
-
-    // Start background workers
-    let compaction_handle = tokio::spawn({
-        let config = Arc::clone(&config);
-        async move {
-            if let Err(e) = start_background_workers(config).await {
-                warn!("Background worker error: {}", e);
-            }
-        }
-    });
-
-    // Wait for shutdown signal
-    match signal::ctrl_c().await {
-        Ok(()) => {
-            info!("Received shutdown signal, gracefully shutting down...");
-        }
-        Err(err) => {
-            warn!("Unable to listen for shutdown signal: {}", err);
-        }
+    match args.command.unwrap_or(Command::Serve) {
+        Command::Serve => serve(Arc::new(config)).await,
+        Command::Audit { cmd } => run_audit(&config, cmd),
     }
+}
 
-    // Wait for tasks to complete
-    let _ = tokio::join!(server_handle, compaction_handle);
+async fn serve(config: Arc<Config>) -> Result<()> {
+    info!("Starting RustHouse");
+    info!("Data directory: {}", config.data_dir);
+    info!("Bind address: {}", config.bind_address);
 
+    tokio::fs::create_dir_all(&config.data_dir).await?;
+    let catalog = Arc::new(
+        Catalog::open(&config.data_dir)
+            .await
+            .context("opening catalog")?,
+    );
+    let audit: Arc<dyn AuditSink> = Arc::new(
+        FileAuditSink::open(Path::new(&config.audit_path())).context("opening audit log")?,
+    );
+    let session = Arc::new(Session::new(catalog, audit));
+    let authenticator = match &config.auth_file {
+        Some(p) => {
+            Arc::new(StaticFileAuthenticator::load(Path::new(p)).context("loading auth file")?)
+        }
+        None => {
+            warn!("no --auth-file given: every request will be rejected with 401");
+            Arc::new(StaticFileAuthenticator::deny_all())
+        }
+    };
+    let state = AppState {
+        session,
+        authenticator,
+        config: config.clone(),
+    };
+
+    let app = create_router(state);
+    let addr: std::net::SocketAddr = config.bind_address.parse()?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!("HTTP server listening on {}", addr);
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            if let Err(e) = signal::ctrl_c().await {
+                warn!("Unable to listen for shutdown signal: {}", e);
+            }
+            info!("Received shutdown signal, gracefully shutting down...");
+        })
+        .await?;
     info!("RustHouse shutdown complete");
     Ok(())
 }
 
-async fn start_server(config: Arc<Config>) -> Result<()> {
-    use axum::{routing::get, Router};
-    use std::net::SocketAddr;
-
-    let app = Router::new()
-        .route("/health", get(health_check))
-        .route("/", get(root_handler))
-        .with_state(config.clone());
-
-    let addr: SocketAddr = config.bind_address.parse()?;
-    info!("HTTP server listening on {}", addr);
-
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-
-    Ok(())
-}
-
-async fn start_background_workers(_config: Arc<Config>) -> Result<()> {
-    info!("Background workers started");
-    // Workers will be implemented in later steps
-    tokio::time::sleep(tokio::time::Duration::from_secs(u64::MAX)).await;
-    Ok(())
-}
-
-async fn health_check() -> &'static str {
-    "OK"
-}
-
-async fn root_handler() -> &'static str {
-    "RustHouse OLAP Database v0.1.0"
+fn run_audit(config: &Config, cmd: AuditCmd) -> Result<()> {
+    let root = PathBuf::from(config.audit_path());
+    match cmd {
+        AuditCmd::Verify { from } => {
+            let report = audit::verify(&root, from)?;
+            if report.ok {
+                println!("audit chain OK: {} records", report.records);
+                Ok(())
+            } else {
+                eprintln!(
+                    "audit chain BROKEN at seq {}: {}",
+                    report
+                        .first_bad_seq
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "?".into()),
+                    report.reason.unwrap_or_default()
+                );
+                std::process::exit(1)
+            }
+        }
+        AuditCmd::Export {
+            from,
+            to,
+            principal,
+            table,
+            out,
+        } => {
+            let parse = |s: Option<String>| -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+                Ok(match s {
+                    Some(s) => {
+                        Some(chrono::DateTime::parse_from_rfc3339(&s)?.with_timezone(&chrono::Utc))
+                    }
+                    None => None,
+                })
+            };
+            let filter = ExportFilter {
+                from_ts: parse(from)?,
+                to_ts: parse(to)?,
+                principal,
+                table,
+            };
+            let manifest = match &out {
+                Some(path) => {
+                    let mut f = std::fs::File::create(path)?;
+                    let m = audit::export(&root, filter, &mut f)?;
+                    let mp = path.with_extension("manifest.json");
+                    std::fs::write(&mp, serde_json::to_vec_pretty(&m)?)?;
+                    eprintln!("wrote {} and {}", path.display(), mp.display());
+                    m
+                }
+                None => {
+                    let stdout = std::io::stdout();
+                    let mut lock = stdout.lock();
+                    audit::export(&root, filter, &mut lock)?
+                }
+            };
+            eprintln!("{}", serde_json::to_string(&manifest)?);
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -129,9 +212,17 @@ mod tests {
 
     #[test]
     fn test_args_parsing() {
-        let args = Args::parse_from(&["rusthouse", "--bind", "127.0.0.1:9000"]);
+        let args = Args::parse_from(["rusthouse", "--bind", "127.0.0.1:9000"]);
         assert_eq!(args.bind, "127.0.0.1:9000");
         assert_eq!(args.data_dir, "./data");
+        assert!(args.command.is_none());
+        let args = Args::parse_from(["rusthouse", "audit", "verify", "--from", "10"]);
+        assert!(matches!(
+            args.command,
+            Some(Command::Audit {
+                cmd: AuditCmd::Verify { from: Some(10) }
+            })
+        ));
     }
 
     #[tokio::test]

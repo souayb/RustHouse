@@ -17,8 +17,16 @@ tower-http = { version = "0.5", features = ["trace", "cors"] }
 # SQL parsing
 sqlparser = "0.43"
 
-# Columnar data structures (using arrow2 for zero-copy efficiency)
-arrow2 = { version = "0.18", features = ["io_parquet", "io_json"] }
+# Columnar / Parquet (apache arrow-rs, ADR-0003) and the query engine (ADR-0006)
+arrow = "59.3"
+parquet = { version = "59.3", features = ["zstd"] }
+datafusion = { version = "55.0", default-features = false, features = ["parquet", "sql"] }
+async-trait = "0.1"
+
+# Identifiers, hashing, time (LAKE-TXN, GOV-AUD)
+uuid = { version = "1.26", features = ["v4", "serde"] }
+sha2 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
 
 # CLI
 clap = { version = "4.4", features = ["derive"] }
@@ -53,6 +61,7 @@ dashmap = "5.5"
 ahash = "0.8"
 
 [dev-dependencies]
+proptest = "1.11"
 criterion = { version = "0.5", features = ["html_reports"] }
 once_cell = "1.19"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }

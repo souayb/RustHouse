@@ -1,5 +1,60 @@
 # RustHouse: Complete Build & Test Guide
 
+> **Spec-driven development.** RustHouse is evolving from a ClickHouse-style warehouse into a
+> hybrid Lakehouse with bank-grade governance. Behaviour is defined in [`specs/`](specs/README.md)
+> (process), [`specs/constitution.md`](specs/constitution.md), the ADRs in `specs/adr/`, and one
+> spec per feature in `specs/features/`. Every `MUST` requirement is tied to a test; the gate is
+> `scripts/spec-check.sh` and `tests/spec_traceability.rs`. Start with
+> [`specs/roadmap.md`](specs/roadmap.md) and [`specs/architecture/overview.md`](specs/architecture/overview.md).
+> Contributor rules: [`CLAUDE.md`](CLAUDE.md).
+
+## Lakehouse quick start (M1)
+
+```bash
+# 1. Principals for the static authenticator (dev/test only)
+cat > auth.json <<'JSON'
+{"tokens": {"t-analyst": {"id": "alice", "roles": ["analyst"]},
+            "t-dpo":     {"id": "dpo",   "roles": ["classification_admin"]},
+            "t-metrics": {"id": "prom",  "roles": ["metrics_reader"]},
+            "t-sec":     {"id": "sec",   "roles": ["security_admin"]}}}
+JSON
+
+# 2. Serve
+cargo run -- --bind 127.0.0.1:8123 --data-dir ./data --auth-file auth.json
+
+# 3. Create a table: every column needs a classification, or the request is refused
+curl -s -H 'Authorization: Bearer t-analyst' -X POST localhost:8123/v1/ddl -d '{
+  "sql": "CREATE TABLE silver.trades (id INT64, iban STRING, notional FLOAT64)
+          WITH CLASSIFICATION (id Internal, iban Restricted PII, notional Confidential FINANCIAL)"}'
+
+# 4. Write rows (one immutable Parquet file + one rhlog commit)
+curl -s -H 'Authorization: Bearer t-analyst' -X POST 'localhost:8123/v1/write?table=silver.trades' \
+  -d '{"rows": [{"id": 1, "iban": "FR76...", "notional": 1000.5}]}'
+
+# 5. Query, optionally as of a version; the response lists the versions read
+curl -s -H 'Authorization: Bearer t-analyst' -X POST localhost:8123/v1/query \
+  -d '{"sql": "SELECT id, notional FROM silver.trades AS OF VERSION 1 ORDER BY id"}'
+
+# 6. Reclassify (lowering needs the classification_admin role and a REASON)
+curl -s -H 'Authorization: Bearer t-dpo' -X POST localhost:8123/v1/ddl -d '{
+  "sql": "ALTER TABLE silver.trades ALTER COLUMN notional CLASSIFIED AS Internal REASON '"'"'aggregated'"'"'"}'
+
+# 7. Access control (M2): deny by default, grants and policies are audited catalog commits
+curl -s -H 'Authorization: Bearer t-sec' -X POST localhost:8123/v1/ddl -d '{"sql": "GRANT SELECT(id, notional) ON silver.trades TO ROLE analyst"}'
+curl -s -H 'Authorization: Bearer t-sec' -X POST localhost:8123/v1/ddl -d '{"sql": "CREATE ROW POLICY own_desk ON silver.trades FOR ROLE analyst USING (desk = current_attribute('"'"'desk'"'"'))"}'
+curl -s -H 'Authorization: Bearer t-sec' -X POST localhost:8123/v1/ddl -d '{"sql": "CREATE MASKING POLICY iban_mask ON silver.trades.iban FOR ROLE analyst AS partial(last4)"}'
+curl -s -H 'Authorization: Bearer t-sec' -X POST localhost:8123/v1/ddl -d '{"sql": "SHOW POLICIES ON silver.trades AS OF VERSION 3"}'
+
+# 8. Audit trail: hash-chained, append-only, verifiable
+cargo run -- --data-dir ./data audit verify
+cargo run -- --data-dir ./data audit export --principal alice --out extract.jsonl
+```
+
+On disk: `data/catalog/_rhlog/` (catalog log), `data/<layer>/<table>/_rhlog/` + `part-*.parquet`
+(tables), `data/audit/<yyyy>/<mm>/<dd>/*.jsonl` (audit chain). Every request returns an
+`X-Request-Id` that appears in the audit log. See `specs/architecture/overview.md`.
+
+
 ## Quick Start
 
 ### Step 0: Initial Setup

@@ -1,4 +1,5 @@
 use crate::error::{Result, RustHouseError};
+use crate::lake::log::AsOf;
 use sqlparser::ast::{Query, Statement};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser as SqlParser;
@@ -33,6 +34,14 @@ impl Parser {
         Ok(statements[0].clone())
     }
 
+    /// Parse a statement after extracting a trailing table `AS OF VERSION n` /
+    /// `AS OF TIMESTAMP '<rfc3339>'` clause (LAKE-TT-001/002). `sqlparser` 0.43 has no
+    /// temporal-table syntax, so the clause is removed textually before parsing.
+    pub fn parse_with_as_of(&self, sql: &str) -> Result<(Statement, Option<AsOf>)> {
+        let (stripped, as_of) = strip_as_of(sql)?;
+        Ok((self.parse(&stripped)?, as_of))
+    }
+
     pub fn parse_query(&self, sql: &str) -> Result<Box<Query>> {
         let stmt = self.parse(sql)?;
         match stmt {
@@ -42,6 +51,75 @@ impl Parser {
             )),
         }
     }
+}
+
+/// Remove the first `AS OF ...` clause from `sql` and return the parsed target.
+pub fn strip_as_of(sql: &str) -> Result<(String, Option<AsOf>)> {
+    let upper = sql.to_ascii_uppercase();
+    let words: Vec<(usize, &str)> = upper
+        .match_indices(|c: char| !c.is_whitespace())
+        .fold(Vec::new(), |mut acc: Vec<(usize, usize)>, (i, _)| {
+            match acc.last_mut() {
+                Some(last) if last.1 == i => last.1 = i + 1,
+                _ => acc.push((i, i + 1)),
+            }
+            acc
+        })
+        .into_iter()
+        .map(|(a, b)| (a, &upper[a..b]))
+        .collect();
+
+    let Some(pos) = words
+        .windows(2)
+        .position(|w| w[0].1 == "AS" && w[1].1 == "OF")
+    else {
+        return Ok((sql.to_string(), None));
+    };
+    let start = words[pos].0;
+    let kind = words
+        .get(pos + 2)
+        .map(|w| w.1)
+        .ok_or_else(|| RustHouseError::SqlParse("AS OF requires VERSION or TIMESTAMP".into()))?;
+    let (end, as_of) = match kind {
+        "VERSION" => {
+            let (vstart, vtext) = words.get(pos + 3).ok_or_else(|| {
+                RustHouseError::SqlParse("AS OF VERSION requires a number".into())
+            })?;
+            let v: u64 = vtext.parse().map_err(|_| {
+                RustHouseError::SqlParse(format!("AS OF VERSION expects an integer, got '{vtext}'"))
+            })?;
+            (vstart + vtext.len(), AsOf::Version(v))
+        }
+        "TIMESTAMP" => {
+            let lit_start = words.get(pos + 3).map(|w| w.0).ok_or_else(|| {
+                RustHouseError::SqlParse("AS OF TIMESTAMP requires a quoted string".into())
+            })?;
+            let rest = &sql[lit_start..];
+            let inner_end = rest[1..]
+                .find('\'')
+                .filter(|_| rest.starts_with('\''))
+                .ok_or_else(|| {
+                    RustHouseError::SqlParse("AS OF TIMESTAMP requires a quoted string".into())
+                })?;
+            let literal = &rest[1..1 + inner_end];
+            let ts = chrono::DateTime::parse_from_rfc3339(literal).map_err(|e| {
+                RustHouseError::SqlParse(format!(
+                    "AS OF TIMESTAMP '{literal}' must be RFC 3339 with a timezone offset (e.g. 2026-03-31T23:59:59Z): {e}"
+                ))
+            })?;
+            (
+                lit_start + inner_end + 2,
+                AsOf::Timestamp(ts.timestamp_millis()),
+            )
+        }
+        other => {
+            return Err(RustHouseError::SqlParse(format!(
+                "AS OF requires VERSION or TIMESTAMP, got '{other}'"
+            )))
+        }
+    };
+    let stripped = format!("{} {}", sql[..start].trim_end(), sql[end..].trim_start());
+    Ok((stripped.trim().to_string(), Some(as_of)))
 }
 
 impl Default for Parser {

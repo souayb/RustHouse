@@ -26,6 +26,12 @@ pub struct SegmentStats {
     pub row_count: usize,
 }
 
+impl Default for SegmentStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SegmentStats {
     pub fn new() -> Self {
         Self {
@@ -96,6 +102,12 @@ impl Table {
 pub struct Metadata {
     pub tables: HashMap<String, Table>,
     pub version: u64,
+}
+
+impl Default for Metadata {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Metadata {

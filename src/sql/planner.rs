@@ -1,4 +1,6 @@
 use crate::error::{Result, RustHouseError};
+use crate::lake::log::AsOf;
+use crate::sql::Parser;
 use crate::storage::Predicate;
 use sqlparser::ast::{
     BinaryOperator, Expr, FunctionArg, FunctionArgExpr, GroupByExpr, Query, Select, SelectItem,
@@ -21,11 +23,27 @@ pub struct AggregateExpr {
     pub alias: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SortKey {
+    pub column: String,
+    pub ascending: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
     Scan {
         table: String,
         columns: Vec<String>,
+        /// Time-travel pin (LAKE-TT-001/002); `None` reads the head resolved at plan time.
+        as_of: Option<AsOf>,
+    },
+    Sort {
+        input: Box<LogicalPlan>,
+        keys: Vec<SortKey>,
+    },
+    Limit {
+        input: Box<LogicalPlan>,
+        limit: usize,
     },
     Filter {
         input: Box<LogicalPlan>,
@@ -42,6 +60,122 @@ pub enum LogicalPlan {
     },
 }
 
+impl LogicalPlan {
+    /// The single table this plan scans (M1 plans have exactly one scan).
+    pub fn table_name(&self) -> Option<String> {
+        match self {
+            LogicalPlan::Scan { table, .. } => Some(table.clone()),
+            LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Project { input, .. }
+            | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::Limit { input, .. } => input.table_name(),
+        }
+    }
+
+    pub fn as_of(&self) -> Option<AsOf> {
+        match self {
+            LogicalPlan::Scan { as_of, .. } => *as_of,
+            LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Project { input, .. }
+            | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::Limit { input, .. } => input.as_of(),
+        }
+    }
+
+    /// Column names the plan reads. Contains `"*"` when the whole table is needed.
+    /// Used by the Governor to check classifications and grants (GOV-CLS-009, GOV-ACC).
+    pub fn referenced_columns(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_columns(&mut out);
+        if !self.narrows_output() {
+            // `SELECT *`: every column of the table reaches the caller.
+            out.insert(0, "*".to_string());
+        }
+        out
+    }
+
+    fn narrows_output(&self) -> bool {
+        match self {
+            LogicalPlan::Project { .. } | LogicalPlan::Aggregate { .. } => true,
+            LogicalPlan::Scan { .. } => false,
+            LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::Limit { input, .. } => input.narrows_output(),
+        }
+    }
+
+    fn collect_columns(&self, out: &mut Vec<String>) {
+        fn push(out: &mut Vec<String>, c: &str) {
+            if !out.iter().any(|x| x == c) {
+                out.push(c.to_string());
+            }
+        }
+        match self {
+            LogicalPlan::Scan { .. } => {}
+            LogicalPlan::Filter { input, predicate } => {
+                input.collect_columns(out);
+                for c in predicate_columns(predicate) {
+                    push(out, &c);
+                }
+            }
+            LogicalPlan::Project { input, columns } => {
+                input.collect_columns(out);
+                for c in columns {
+                    push(out, c);
+                }
+            }
+            LogicalPlan::Aggregate {
+                input,
+                group_by,
+                aggregates,
+            } => {
+                input.collect_columns(out);
+                for c in group_by {
+                    push(out, c);
+                }
+                for a in aggregates {
+                    if let Some(c) = &a.column {
+                        push(out, c);
+                    }
+                }
+            }
+            LogicalPlan::Sort { input, keys } => {
+                input.collect_columns(out);
+                for k in keys {
+                    push(out, &k.column);
+                }
+            }
+            LogicalPlan::Limit { input, .. } => input.collect_columns(out),
+        }
+    }
+}
+
+/// Columns referenced by a predicate, in first-seen order.
+pub fn predicate_columns(p: &Predicate) -> Vec<String> {
+    fn walk(p: &Predicate, out: &mut Vec<String>) {
+        match p {
+            Predicate::Eq(c, _)
+            | Predicate::Gt(c, _)
+            | Predicate::Lt(c, _)
+            | Predicate::Gte(c, _)
+            | Predicate::Lte(c, _) => {
+                if !out.iter().any(|x| x == c) {
+                    out.push(c.clone());
+                }
+            }
+            Predicate::And(a, b) | Predicate::Or(a, b) => {
+                walk(a, out);
+                walk(b, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(p, &mut out);
+    out
+}
+
 pub struct Planner;
 
 impl Planner {
@@ -49,29 +183,70 @@ impl Planner {
         Self
     }
 
+    /// Parse and plan in one step, including the `AS OF` clause (LAKE-TT-001/002).
+    pub fn plan_sql(&self, sql: &str) -> Result<LogicalPlan> {
+        let (stmt, as_of) = Parser::new().parse_with_as_of(sql)?;
+        self.plan_with_as_of(stmt, as_of)
+    }
+
     pub fn plan(&self, stmt: Statement) -> Result<LogicalPlan> {
+        self.plan_with_as_of(stmt, None)
+    }
+
+    pub fn plan_with_as_of(&self, stmt: Statement, as_of: Option<AsOf>) -> Result<LogicalPlan> {
         match stmt {
-            Statement::Query(query) => self.plan_query(*query),
+            Statement::Query(query) => self.plan_query(*query, as_of),
             _ => Err(RustHouseError::SqlParse(
                 "Only SELECT queries supported".to_string(),
             )),
         }
     }
 
-    fn plan_query(&self, query: Query) -> Result<LogicalPlan> {
-        if let SetExpr::Select(select) = *query.body {
-            self.plan_select(*select)
-        } else {
-            Err(RustHouseError::SqlParse(
+    fn plan_query(&self, query: Query, as_of: Option<AsOf>) -> Result<LogicalPlan> {
+        let SetExpr::Select(select) = *query.body else {
+            return Err(RustHouseError::SqlParse(
                 "Only simple SELECT supported".to_string(),
-            ))
+            ));
+        };
+        let mut plan = self.plan_select(*select, as_of)?;
+        if !query.order_by.is_empty() {
+            let keys = query
+                .order_by
+                .iter()
+                .map(|o| {
+                    Ok(SortKey {
+                        column: self.expr_to_column_name(&o.expr)?,
+                        ascending: o.asc.unwrap_or(true),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            plan = LogicalPlan::Sort {
+                input: Box::new(plan),
+                keys,
+            };
         }
+        if let Some(limit) = query.limit {
+            let v = self.expr_to_value(&limit)?;
+            let n = v.as_u64().ok_or_else(|| {
+                RustHouseError::SqlParse("LIMIT must be a non-negative integer".into())
+            })?;
+            plan = LogicalPlan::Limit {
+                input: Box::new(plan),
+                limit: n as usize,
+            };
+        }
+        Ok(plan)
     }
 
-    fn plan_select(&self, select: Select) -> Result<LogicalPlan> {
+    fn plan_select(&self, select: Select, as_of: Option<AsOf>) -> Result<LogicalPlan> {
         // Extract table name
         if select.from.is_empty() {
             return Err(RustHouseError::SqlParse("No table specified".to_string()));
+        }
+        if select.from.len() > 1 || !select.from[0].joins.is_empty() {
+            return Err(RustHouseError::SqlParse(
+                "Joins are not supported yet".to_string(),
+            ));
         }
 
         let table_name = self.extract_table_name(&select.from[0].relation)?;
@@ -80,6 +255,7 @@ impl Planner {
         let mut plan = LogicalPlan::Scan {
             table: table_name,
             columns: vec!["*".to_string()],
+            as_of,
         };
 
         // Apply WHERE clause
@@ -394,6 +570,47 @@ mod tests {
             }
             _ => panic!("Expected aggregate plan"),
         }
+    }
+
+    #[test]
+    fn test_plan_scan_as_of_version() {
+        // REQ: LAKE-TT-001
+        let plan = Planner::new()
+            .plan_sql("SELECT * FROM gold.t AS OF VERSION 12 WHERE id > 1 ORDER BY id DESC LIMIT 5")
+            .unwrap();
+        assert_eq!(plan.as_of(), Some(AsOf::Version(12)));
+        assert_eq!(plan.table_name().as_deref(), Some("gold.t"));
+        let LogicalPlan::Limit { input, limit } = plan else {
+            panic!("expected Limit")
+        };
+        assert_eq!(limit, 5);
+        let LogicalPlan::Sort { keys, .. } = *input else {
+            panic!("expected Sort")
+        };
+        assert_eq!(
+            keys,
+            vec![SortKey {
+                column: "id".into(),
+                ascending: false
+            }]
+        );
+    }
+
+    #[test]
+    fn test_referenced_columns() {
+        let plan = Planner::new()
+            .plan_sql("SELECT id, name FROM t WHERE age > 3 ORDER BY city")
+            .unwrap();
+        let mut cols = plan.referenced_columns();
+        cols.sort();
+        assert_eq!(cols, vec!["age", "city", "id", "name"]);
+        assert_eq!(
+            Planner::new()
+                .plan_sql("SELECT * FROM t")
+                .unwrap()
+                .referenced_columns(),
+            vec!["*"]
+        );
     }
 
     #[test]

@@ -5,13 +5,21 @@ use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
 /// Represents a column of data to be written
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ColumnData {
     Int64(Vec<i64>),
     Float64(Vec<f64>),
     String(Vec<String>),
     Boolean(Vec<bool>),
+    /// Nullable variants (LAKE-PQT-008). Supported by the lake (Parquet) path; the hot-tier
+    /// binary encoding refuses them until HYB-ACC adds a validity bitmap.
+    NullableInt64(Vec<Option<i64>>),
+    NullableFloat64(Vec<Option<f64>>),
+    NullableString(Vec<Option<String>>),
+    NullableBoolean(Vec<Option<bool>>),
 }
+
+const HOT_TIER_NULLS_UNSUPPORTED: &str = "nullable columns are not supported in the hot tier yet";
 
 impl ColumnData {
     pub fn len(&self) -> usize {
@@ -20,7 +28,35 @@ impl ColumnData {
             ColumnData::Float64(v) => v.len(),
             ColumnData::String(v) => v.len(),
             ColumnData::Boolean(v) => v.len(),
+            ColumnData::NullableInt64(v) => v.len(),
+            ColumnData::NullableFloat64(v) => v.len(),
+            ColumnData::NullableString(v) => v.len(),
+            ColumnData::NullableBoolean(v) => v.len(),
         }
+    }
+
+    /// Number of null entries (0 for non-nullable variants).
+    pub fn null_count(&self) -> u64 {
+        match self {
+            ColumnData::Int64(_)
+            | ColumnData::Float64(_)
+            | ColumnData::String(_)
+            | ColumnData::Boolean(_) => 0,
+            ColumnData::NullableInt64(v) => v.iter().filter(|x| x.is_none()).count() as u64,
+            ColumnData::NullableFloat64(v) => v.iter().filter(|x| x.is_none()).count() as u64,
+            ColumnData::NullableString(v) => v.iter().filter(|x| x.is_none()).count() as u64,
+            ColumnData::NullableBoolean(v) => v.iter().filter(|x| x.is_none()).count() as u64,
+        }
+    }
+
+    pub fn is_nullable(&self) -> bool {
+        matches!(
+            self,
+            ColumnData::NullableInt64(_)
+                | ColumnData::NullableFloat64(_)
+                | ColumnData::NullableString(_)
+                | ColumnData::NullableBoolean(_)
+        )
     }
 
     pub fn is_empty(&self) -> bool {
@@ -33,6 +69,10 @@ impl ColumnData {
             ColumnData::Float64(_) => ColumnType::Float64,
             ColumnData::String(_) => ColumnType::String,
             ColumnData::Boolean(_) => ColumnType::Boolean,
+            ColumnData::NullableInt64(_) => ColumnType::Int64,
+            ColumnData::NullableFloat64(_) => ColumnType::Float64,
+            ColumnData::NullableString(_) => ColumnType::String,
+            ColumnData::NullableBoolean(_) => ColumnType::Boolean,
         }
     }
 
@@ -79,10 +119,37 @@ impl ColumnData {
                 let max = v.iter().any(|&x| x);
                 (serde_json::json!(!min), serde_json::json!(max))
             }
+            // Nulls are ignored; all-null gives (null, null) (LAKE-PQT-008).
+            ColumnData::NullableInt64(v) => {
+                let present: Vec<i64> = v.iter().flatten().copied().collect();
+                ColumnData::Int64(present).stats()
+            }
+            ColumnData::NullableFloat64(v) => {
+                let present: Vec<f64> = v.iter().flatten().copied().collect();
+                ColumnData::Float64(present).stats()
+            }
+            ColumnData::NullableString(v) => {
+                let present: Vec<String> = v.iter().flatten().cloned().collect();
+                ColumnData::String(present).stats()
+            }
+            ColumnData::NullableBoolean(v) => {
+                let present: Vec<bool> = v.iter().flatten().copied().collect();
+                ColumnData::Boolean(present).stats()
+            }
         }
     }
 
-    /// Serialize column data to bytes
+    /// Serialize column data to bytes (hot-tier format). Nullable variants are refused.
+    pub fn try_to_bytes(&self) -> Result<Vec<u8>> {
+        if self.is_nullable() {
+            return Err(RustHouseError::InvalidData(
+                HOT_TIER_NULLS_UNSUPPORTED.to_string(),
+            ));
+        }
+        Ok(self.to_bytes())
+    }
+
+    /// Serialize column data to bytes. Panics for nullable variants; use `try_to_bytes`.
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
             ColumnData::Int64(v) => {
@@ -111,7 +178,7 @@ impl ColumnData {
             }
             ColumnData::Boolean(v) => {
                 // Pack 8 booleans per byte
-                let mut bytes = Vec::with_capacity((v.len() + 7) / 8);
+                let mut bytes = Vec::with_capacity(v.len().div_ceil(8));
                 for chunk in v.chunks(8) {
                     let mut byte = 0u8;
                     for (i, &b) in chunk.iter().enumerate() {
@@ -122,6 +189,12 @@ impl ColumnData {
                     bytes.push(byte);
                 }
                 bytes
+            }
+            ColumnData::NullableInt64(_)
+            | ColumnData::NullableFloat64(_)
+            | ColumnData::NullableString(_)
+            | ColumnData::NullableBoolean(_) => {
+                panic!("{HOT_TIER_NULLS_UNSUPPORTED}; call try_to_bytes")
             }
         }
     }
@@ -214,7 +287,7 @@ impl ColumnWriter {
 
     /// Write a column to disk with compression
     pub async fn write<P: AsRef<Path>>(&self, path: P, data: &ColumnData) -> Result<u64> {
-        let bytes = data.to_bytes();
+        let bytes = data.try_to_bytes()?;
         let compressed = lz4_flex::compress_prepend_size(&bytes);
 
         let mut file = File::create(path).await?;

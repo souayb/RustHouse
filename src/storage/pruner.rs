@@ -24,62 +24,70 @@ impl SegmentPruner {
     }
 
     fn can_match(segment: &Segment, predicate: &Predicate) -> bool {
-        match predicate {
-            Predicate::Eq(column, value) => {
-                // Segment can match if value is within [min, max] range
-                let min = segment.stats.min_values.get(column);
-                let max = segment.stats.max_values.get(column);
+        Self::can_match_with(predicate, &|column| match (
+            segment.stats.min_values.get(column),
+            segment.stats.max_values.get(column),
+        ) {
+            (Some(min), Some(max)) => Some((min.clone(), max.clone())),
+            _ => None,
+        })
+    }
 
-                match (min, max) {
-                    (Some(min), Some(max)) => {
-                        Self::compare_values(value, min) >= 0
-                            && Self::compare_values(value, max) <= 0
-                    }
-                    _ => true, // If no stats, can't prune
-                }
-            }
-            Predicate::Gt(column, value) => {
-                // Segment can match if max > value
-                let max = segment.stats.max_values.get(column);
-                match max {
-                    Some(max) => Self::compare_values(max, value) > 0,
-                    None => true,
-                }
-            }
-            Predicate::Lt(column, value) => {
-                // Segment can match if min < value
-                let min = segment.stats.min_values.get(column);
-                match min {
-                    Some(min) => Self::compare_values(min, value) < 0,
-                    None => true,
-                }
-            }
-            Predicate::Gte(column, value) => {
-                // Segment can match if max >= value
-                let max = segment.stats.max_values.get(column);
-                match max {
-                    Some(max) => Self::compare_values(max, value) >= 0,
-                    None => true,
-                }
-            }
-            Predicate::Lte(column, value) => {
-                // Segment can match if min <= value
-                let min = segment.stats.min_values.get(column);
-                match min {
-                    Some(min) => Self::compare_values(min, value) <= 0,
-                    None => true,
-                }
-            }
+    /// Evaluate `predicate` against a statistics lookup that returns `(min, max)` for a
+    /// column, or `None` when statistics are absent (then the range is kept).
+    pub fn can_match_with(
+        predicate: &Predicate,
+        stats: &dyn Fn(&str) -> Option<(serde_json::Value, serde_json::Value)>,
+    ) -> bool {
+        match predicate {
+            Predicate::Eq(column, _)
+            | Predicate::Gt(column, _)
+            | Predicate::Lt(column, _)
+            | Predicate::Gte(column, _)
+            | Predicate::Lte(column, _) => match stats(column) {
+                Some((min, max)) => range_can_match(&min, &max, predicate),
+                None => true,
+            },
             Predicate::And(left, right) => {
-                Self::can_match(segment, left) && Self::can_match(segment, right)
+                Self::can_match_with(left, stats) && Self::can_match_with(right, stats)
             }
             Predicate::Or(left, right) => {
-                Self::can_match(segment, left) || Self::can_match(segment, right)
+                Self::can_match_with(left, stats) || Self::can_match_with(right, stats)
             }
         }
     }
+}
 
-    fn compare_values(a: &serde_json::Value, b: &serde_json::Value) -> i32 {
+/// Can a range `[min, max]` contain a row satisfying a leaf predicate? Shared by the hot-tier
+/// `SegmentPruner` and Parquet row-group pruning (LAKE-PQT-007). `And`/`Or` recurse on the
+/// same range; a null (absent) bound keeps the range.
+pub fn range_can_match(
+    min: &serde_json::Value,
+    max: &serde_json::Value,
+    predicate: &Predicate,
+) -> bool {
+    if min.is_null() || max.is_null() {
+        return match predicate {
+            Predicate::And(l, r) => range_can_match(min, max, l) && range_can_match(min, max, r),
+            Predicate::Or(l, r) => range_can_match(min, max, l) || range_can_match(min, max, r),
+            _ => true,
+        };
+    }
+    match predicate {
+        Predicate::Eq(_, value) => {
+            compare_values(value, min) >= 0 && compare_values(value, max) <= 0
+        }
+        Predicate::Gt(_, value) => compare_values(max, value) > 0,
+        Predicate::Lt(_, value) => compare_values(min, value) < 0,
+        Predicate::Gte(_, value) => compare_values(max, value) >= 0,
+        Predicate::Lte(_, value) => compare_values(min, value) <= 0,
+        Predicate::And(l, r) => range_can_match(min, max, l) && range_can_match(min, max, r),
+        Predicate::Or(l, r) => range_can_match(min, max, l) || range_can_match(min, max, r),
+    }
+}
+
+fn compare_values(a: &serde_json::Value, b: &serde_json::Value) -> i32 {
+    {
         use serde_json::Value;
 
         match (a, b) {
@@ -122,6 +130,40 @@ mod tests {
     use super::*;
     use crate::meta::Segment;
     use std::path::PathBuf;
+
+    #[test]
+    fn test_range_can_match_shared_with_segment_pruner() {
+        // REQ: LAKE-PQT-007 — the free function and the segment pruner agree on every leaf.
+        let seg = create_test_segment("s", 101, 200);
+        let (min, max) = (serde_json::json!(101), serde_json::json!(200));
+        let preds = [
+            Predicate::Eq("id".into(), serde_json::json!(150)),
+            Predicate::Eq("id".into(), serde_json::json!(50)),
+            Predicate::Gt("id".into(), serde_json::json!(200)),
+            Predicate::Gte("id".into(), serde_json::json!(200)),
+            Predicate::Lt("id".into(), serde_json::json!(101)),
+            Predicate::Lte("id".into(), serde_json::json!(101)),
+            Predicate::And(
+                Box::new(Predicate::Gt("id".into(), serde_json::json!(150))),
+                Box::new(Predicate::Lt("id".into(), serde_json::json!(160))),
+            ),
+            Predicate::Or(
+                Box::new(Predicate::Lt("id".into(), serde_json::json!(0))),
+                Box::new(Predicate::Gt("id".into(), serde_json::json!(199))),
+            ),
+        ];
+        for p in &preds {
+            let via_segment =
+                !SegmentPruner::prune_segments(std::slice::from_ref(&seg), p).is_empty();
+            assert_eq!(range_can_match(&min, &max, p), via_segment, "{p:?}");
+        }
+        // Absent (null) statistics keep the range.
+        assert!(range_can_match(
+            &serde_json::Value::Null,
+            &serde_json::Value::Null,
+            &Predicate::Eq("id".into(), serde_json::json!(1))
+        ));
+    }
 
     fn create_test_segment(id: &str, min_id: i64, max_id: i64) -> Segment {
         let mut segment = Segment::new(

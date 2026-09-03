@@ -7,6 +7,10 @@ pub struct Config {
     pub max_segment_size: usize,
     pub compaction_interval_secs: u64,
     pub compression_level: i32,
+    /// HTTP request body limit (API-SQL-009).
+    pub max_request_bytes: usize,
+    /// Static authenticator file (API-SQL-002); `None` means every request is 401.
+    pub auth_file: Option<String>,
 }
 
 impl Config {
@@ -17,6 +21,8 @@ impl Config {
             max_segment_size: 1024 * 1024 * 100, // 100MB default
             compaction_interval_secs: 300,       // 5 minutes
             compression_level: 3,                // LZ4 default level
+            max_request_bytes: 16 * 1024 * 1024, // 16 MiB
+            auth_file: None,
         }
     }
 
@@ -26,6 +32,10 @@ impl Config {
 
     pub fn segments_path(&self) -> String {
         format!("{}/segments", self.data_dir)
+    }
+
+    pub fn audit_path(&self) -> String {
+        format!("{}/audit", self.data_dir)
     }
 }
 
